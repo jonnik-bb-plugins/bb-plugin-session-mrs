@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   classifyError,
+  createdByThreadFallback,
+  extractCreatedUrls,
+  isCreateCommand,
   extractMrRefs,
   formatTable,
   mapGithubPr,
@@ -118,7 +121,7 @@ test("error classification: only transient failures are kept", () => {
     "GraphQL: Could not resolve to a Repository with the name 'a/b'.",
     "dial tcp: lookup nope.invalid: no such host",
   ]) assert.equal(classifyError(m), "permanent", m);
-  for (const m of ["timed out", "connect ETIMEDOUT 1.2.3.4:443", "ECONNRESET", "glab: 502 Bad Gateway (HTTP 502)", "glab not found", "API rate limit exceeded"]) {
+  for (const m of ["timed out", "connect ETIMEDOUT 1.2.3.4:443", "ECONNRESET", "glab: 502 Bad Gateway (HTTP 502)", "glab not found", "API rate limit exceeded", 'Get "https://h/api": net/http: TLS handshake timeout']) {
     assert.equal(classifyError(m), "transient", m);
   }
   const ref = extractMrRefs("https://github.com/a/b/pull/1")[0]!;
@@ -143,4 +146,69 @@ test("sort: open, draft, merged, closed, unavailable; newest first within a grou
     { ...ref, number: 7, error: "timed out", errorKind: "transient" as const },
   ];
   assert.deepEqual(sortMrs(rows).map((r) => r.number), [6, 4, 3, 5, 2, 1, 7]);
+});
+
+// Fixtures follow real thread events: item/completed with data.item.
+const cmd = (command: string, aggregatedOutput: string, exitCode = 0, extra = {}) => ({
+  type: "item/completed",
+  data: { item: { type: "commandExecution", command, aggregatedOutput, exitCode, ...extra } },
+});
+const tool = (name: string, result: unknown, status = "completed") => ({
+  type: "item/completed",
+  data: { item: { type: "toolCall", tool: name, arguments: {}, result, status } },
+});
+const GL = "https://gitlab.example.com/acme/tools/widgets/-/merge_requests";
+
+test("(a) creation evidence: glab mr create, incl. subagent items", () => {
+  const rows = [
+    cmd(
+      "git push -u origin b 2>&1 | tail -4; glab mr create -R acme/tools/widgets --draft --yes 2>&1 | tail -3",
+      `Creating draft merge request for b into main\n\n${GL}/93`,
+    ),
+    cmd("glab mr create --yes", `${GL}/94`, 0, { parentToolCallId: "toolu_1" }),
+    cmd("glab mr view 91", `${GL}/91`),
+    cmd("glab mr create --yes", `${GL}/92`, 1),
+    { type: "client/turn/requested", data: { input: [{ type: "text", text: `see ${GL}/90` }] } },
+  ];
+  assert.deepEqual([...extractCreatedUrls(rows)].sort(), [`${GL}/93`, `${GL}/94`]);
+});
+
+test("(a) git push -o merge_request.create, gh pr create, API POST, MCP tool", () => {
+  const rows = [
+    cmd("git push -o merge_request.create -o merge_request.target=main origin x", `remote: View merge request for x:\nremote:   ${GL}/5\n`),
+    cmd("gh pr create --fill", "https://github.com/acme/widgets/pull/7\n"),
+    cmd("glab api projects/g%2Fp/merge_requests -X POST -f title=t", JSON.stringify({ web_url: `${GL}/6` })),
+    cmd("curl -s -X POST https://api.github.com/repos/a/b/pulls -d '{}'", JSON.stringify({ html_url: "https://github.com/a/b/pull/8" })),
+    tool("mcp__gitlab__create_merge_request", { web_url: `${GL}/9` }),
+    tool("mcp__github__create_pull_request", "https://github.com/a/b/pull/10", "failed"),
+    cmd("glab api projects/g%2Fp/merge_requests/11/notes -f body=hi", `${GL}/11`),
+    cmd("glab api projects/g%2Fp/merge_requests/12", `${GL}/12`),
+  ];
+  assert.deepEqual(
+    [...extractCreatedUrls(rows)].sort(),
+    [`${GL}/5`, `${GL}/6`, `${GL}/9`, "https://github.com/acme/widgets/pull/7", "https://github.com/a/b/pull/8"].sort(),
+  );
+  assert.ok(isCreateCommand("glab mr create"));
+  assert.ok(!isCreateCommand("glab mr list"));
+});
+
+test("(b) fallback: inside the thread's lifetime and authored by the CLI user", () => {
+  const win = { createdAt: Date.parse("2026-11-16T10:00:00Z"), updatedAt: Date.parse("2026-11-16T12:00:00Z") };
+  const mr = (createdAt: string, author = "me") => ({ createdAt, author });
+  assert.ok(createdByThreadFallback(mr("2026-11-16T11:00:00Z"), win, "me"));
+  assert.ok(createdByThreadFallback(mr("2026-11-16T10:00:00Z", "ME"), win, "me"));
+  assert.ok(createdByThreadFallback(mr("2026-11-16T12:00:00Z"), win, "me"));
+  assert.ok(!createdByThreadFallback(mr("2026-11-16T09:59:59Z"), win, "me"));
+  assert.ok(!createdByThreadFallback(mr("2026-11-16T12:00:01Z"), win, "me"));
+  assert.ok(!createdByThreadFallback(mr("2026-11-16T11:00:00Z", "other"), win, "me"));
+  assert.ok(!createdByThreadFallback(mr("2026-11-16T11:00:00Z"), win, null));
+  assert.ok(!createdByThreadFallback(mr("2026-11-16T11:00:00Z"), null, "me"));
+  assert.ok(!createdByThreadFallback({ author: "me" }, win, "me"));
+});
+
+test("(a) ignores creation text inside a heredoc body", () => {
+  const script = "python3 - <<'EOF'\nrun('glab mr create --yes')\nEOF\nnpm test";
+  assert.ok(!isCreateCommand(script));
+  assert.ok(isCreateCommand("cat > d.md <<'EOF'\nbody\nEOF\nglab mr create --description \"$(cat d.md)\""));
+  assert.equal(extractCreatedUrls([cmd(script, `${GL}/5`)]).size, 0);
 });

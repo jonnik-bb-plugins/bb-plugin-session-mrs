@@ -1,7 +1,7 @@
 # Session MRs
 
-A BB plugin that shows every GitLab merge request and GitHub pull request linked
-in the current thread, with live state, pipeline/checks status and a clickable
+A BB plugin that shows every GitLab merge request and GitHub pull request the
+current thread created, with live state, pipeline/checks status and a clickable
 link.
 
 ## What you get
@@ -12,9 +12,19 @@ link.
   result (`✓` / `✗` / `…`). Clicking a row opens the MR in the browser. The
   section is hidden when the thread links no MR. It refetches on mount, when the
   thread changes, and every 60 seconds; the refresh icon forces a fresh read.
-- `bb session-mrs list [--thread <id>] [--refresh] [--json]` and
+- `bb session-mrs list [--thread <id>] [--refresh] [--mentioned] [--json]` and
   `bb session-mrs status <url> [--json]` for agents and shells. See
   `skills/session-mrs/SKILL.md`.
+
+## Which MRs count as created by the thread
+
+Linked in the thread's events (subagents included) and either (a) printed by a
+successful creating command or tool (`glab mr create`, `gh pr create`,
+`git push -o merge_request.create`, a POST to `.../merge_requests` or `/pulls`,
+MCP `create_merge_request` / `create_pull_request`), or (b) created between the
+thread's creation and last activity by the account the `glab`/`gh` login
+belongs to. Mentioned-only links are hidden; `--mentioned` shows them with an
+`origin` field. Heredoc bodies are ignored when looking for creating commands.
 
 ## How it works
 

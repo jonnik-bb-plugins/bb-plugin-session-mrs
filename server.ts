@@ -8,6 +8,8 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
   classifyError,
+  createdByThreadFallback,
+  extractCreatedUrls,
   extractMrRefs,
   formatTable,
   mapGithubPr,
@@ -35,7 +37,9 @@ const mrStatusSchema = z.object({
   sourceBranch: z.string().optional(),
   targetBranch: z.string().optional(),
   author: z.string().optional(),
+  createdAt: z.string().optional(),
   updatedAt: z.string().optional(),
+  origin: z.enum(["created", "mentioned"]).optional(),
   webUrl: z.string().optional(),
   error: z.string().optional(),
   errorKind: z.enum(["transient", "permanent"]).optional(),
@@ -88,9 +92,12 @@ function run(bin: string, args: string[]): Promise<string> {
       },
       (err, stdout, stderr) => {
         if (err) {
-          const lines = String(stderr || err.message).split("\n").map((l) => l.trim());
+          const full = String(stderr || err.message);
+          const lines = full.split("\n").map((l) => l.trim());
           const detail = (lines.find((l) => l !== "" && l.toUpperCase() !== "ERROR") ?? err.message).slice(0, 160);
-          reject(new Error((err as any).killed ? "timed out" : detail));
+          // Classify on the full text: the shown line may be cut before "timeout".
+          const message = (err as any).killed ? "timed out" : detail;
+          reject(Object.assign(new Error(message), { errorKind: classifyError(`${message}\n${full}`) }));
         } else resolve(stdout);
       },
     );
@@ -117,12 +124,12 @@ async function fetchStatus(ref: MrRef): Promise<MrStatus> {
       "view",
       ref.url,
       "--json",
-      "title,state,isDraft,url,headRefName,baseRefName,statusCheckRollup,mergeStateStatus,author,updatedAt",
+      "title,state,isDraft,url,headRefName,baseRefName,statusCheckRollup,mergeStateStatus,author,createdAt,updatedAt",
     ]);
     return mapGithubPr(ref, JSON.parse(out));
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
-    return { ...ref, error, errorKind: classifyError(error) };
+    return { ...ref, error, errorKind: (e as any)?.errorKind ?? classifyError(error) };
   }
 }
 
@@ -150,7 +157,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.log.info("loaded");
 
   const statusCache = new Map<string, { at: number; value: MrStatus }>();
-  const urlCache = new Map<string, MrRef[]>();
+  const linksCache = new Map<string, ThreadLinks>();
   // Concurrent callers (several panes, 60s pollers) share one in-flight fetch.
   const inflight = new Map<string, Promise<MrStatus>>();
 
@@ -169,38 +176,84 @@ export default async function plugin(bb: BbPluginApi) {
     return p;
   }
 
-  async function threadRefs(threadId: string, refresh: boolean): Promise<MrRef[]> {
-    const hit = urlCache.get(threadId);
+  interface ThreadLinks {
+    /** Every MR/PR URL mentioned, in order of first appearance (max 50, plus creations). */
+    refs: MrRef[];
+    /** URLs printed by a command/tool that created them (rule a). */
+    created: Set<string>;
+  }
+
+  async function threadLinks(threadId: string, refresh: boolean): Promise<ThreadLinks> {
+    const hit = linksCache.get(threadId);
     if (!refresh && hit) return hit;
     // The timeline view collapses tool output, so read the raw events that
     // carry content (user input, completed items incl. command output) page
     // by page. Each page is searched as JSON: JSON escapes (\n, \") end a
     // URL because `\` is not a URL character.
     const found = new Map<string, MrRef>();
+    const created = new Set<string>();
     let afterSeq: string | undefined;
-    for (let page = 0; page < MAX_EVENT_PAGES && found.size < MAX_MRS_PER_THREAD; page++) {
+    for (let page = 0; page < MAX_EVENT_PAGES; page++) {
       const rows = await bb.sdk.threads.events.list({
         threadId,
         types: ["client/turn/requested", "item/completed"],
         limit: String(EVENT_PAGE_SIZE),
         ...(afterSeq === undefined ? {} : { afterSeq }),
       });
+      for (const url of extractCreatedUrls(rows)) created.add(url);
       for (const ref of extractMrRefs(JSON.stringify(rows))) {
-        if (found.size < MAX_MRS_PER_THREAD && !found.has(ref.url)) found.set(ref.url, ref);
+        if (!found.has(ref.url) && (found.size < MAX_MRS_PER_THREAD || created.has(ref.url))) found.set(ref.url, ref);
       }
       if (rows.length < EVENT_PAGE_SIZE) break;
       afterSeq = String(rows[rows.length - 1]!.seq);
     }
-    const refs = [...found.values()];
-    capped(urlCache, threadId, refs);
-    return refs;
+    const links = { refs: [...found.values()], created };
+    capped(linksCache, threadId, links);
+    return links;
   }
 
-  /** Sorted rows; links that do not resolve to a real MR/PR only with `all`. */
-  async function listThreadMergeRequests(threadId: string, refresh = false, all = false): Promise<MrStatus[]> {
-    const refs = await threadRefs(threadId, refresh);
-    const rows = await mapLimit(refs, CONCURRENCY, (ref) => cachedStatus(ref, refresh));
-    return sortMrs(all ? rows : visibleMrs(rows));
+  /** The CLI's own account per host (cached), for rule (b). */
+  const users = new Map<string, Promise<string | null>>();
+  function authUser(ref: MrRef): Promise<string | null> {
+    let p = users.get(ref.host);
+    if (!p) {
+      p = (async () => {
+        try {
+          if (ref.provider === "gitlab") {
+            const glab = resolveBin("glab");
+            return glab ? (JSON.parse(await run(glab, ["api", "--hostname", ref.host, "user"])).username ?? null) : null;
+          }
+          const gh = resolveBin("gh");
+          return gh ? (JSON.parse(await run(gh, ["api", "user"])).login ?? null) : null;
+        } catch {
+          users.delete(ref.host); // retry next time
+          return null;
+        }
+      })();
+      users.set(ref.host, p);
+    }
+    return p;
+  }
+
+  /**
+   * Sorted rows. By default only MRs this thread created (creation evidence,
+   * else created during its lifetime by the CLI's user) that resolve to a real
+   * MR/PR; `mentioned` adds mentioned-only and unresolvable links.
+   */
+  async function listThreadMergeRequests(threadId: string, refresh = false, mentioned = false): Promise<MrStatus[]> {
+    const { refs, created } = await threadLinks(threadId, refresh);
+    const thread = await bb.sdk.threads
+      .get({ threadId })
+      .then((t) => ({ createdAt: t.createdAt, updatedAt: t.updatedAt }))
+      .catch(() => null);
+    const rows = await mapLimit(refs, CONCURRENCY, async (ref): Promise<MrStatus> => {
+      const row = await cachedStatus(ref, refresh);
+      if (created.has(ref.url)) return { ...row, origin: "created" };
+      if (row.error) return { ...row, origin: "mentioned" };
+      const fallback = createdByThreadFallback(row, thread, await authUser(ref));
+      return { ...row, origin: fallback ? "created" : "mentioned" };
+    });
+    return sortMrs(mentioned ? rows : visibleMrs(rows.filter((r) => r.origin === "created")));
   }
 
   bb.rpc.register(rpcContract, {
@@ -209,23 +262,23 @@ export default async function plugin(bb: BbPluginApi) {
 
   // A finished turn may have added links; drop the cached URL list.
   bb.events.on("thread.idle", ({ thread }) => {
-    urlCache.delete(thread.id);
+    linksCache.delete(thread.id);
   });
 
   const usage = [
     "Usage:",
-    "  bb session-mrs list [--thread <id>] [--refresh] [--all] [--json]",
+    "  bb session-mrs list [--thread <id>] [--refresh] [--mentioned] [--json]",
     "  bb session-mrs status <url> [--json]",
   ].join("\n");
 
   bb.cli.register({
     name: "session-mrs",
-    summary: "Show the merge/pull requests linked in a thread, with live status",
+    summary: "Show the merge/pull requests a thread created, with live status",
     commands: [
       {
         name: "list",
-        summary: "List MRs/PRs linked in a thread (default: the current thread); --all adds links that do not resolve",
-        usage: "bb session-mrs list [--thread <id>] [--refresh] [--all] [--json]",
+        summary: "List MRs/PRs created by a thread (default: the current thread); --mentioned adds links it only mentions and unresolved ones",
+        usage: "bb session-mrs list [--thread <id>] [--refresh] [--mentioned] [--json]",
       },
       {
         name: "status",
@@ -238,12 +291,12 @@ export default async function plugin(bb: BbPluginApi) {
       const args: string[] = [];
       let thread: string | undefined;
       let refresh = false;
-      let all = false;
+      let mentioned = false;
       for (let i = 0; i < argv.length; i++) {
         const a = argv[i]!;
         if (a === "--json") continue;
         if (a === "--refresh") refresh = true;
-        else if (a === "--all") all = true;
+        else if (a === "--mentioned") mentioned = true;
         else if (a === "--thread") thread = argv[++i];
         else if (a.startsWith("--thread=")) thread = a.slice("--thread=".length);
         else args.push(a);
@@ -261,8 +314,8 @@ export default async function plugin(bb: BbPluginApi) {
             if (!threadId || rest.length > 0 || !/^[A-Za-z0-9_-]{1,100}$/.test(threadId)) {
               return { exitCode: 1, stderr: `${usage}\n(pass --thread <id>)` };
             }
-            const rows = await listThreadMergeRequests(threadId, refresh, all);
-            return out(rows, formatTable(rows));
+            const rows = await listThreadMergeRequests(threadId, refresh, mentioned);
+            return out(rows, formatTable(rows, mentioned));
           }
           case "status": {
             const ref = rest.length === 1 ? parseMrUrl(rest[0]!) : null;
