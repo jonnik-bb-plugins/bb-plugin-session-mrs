@@ -24,7 +24,7 @@ const POLL_MS = 60_000;
 
 const stateLabel = (mr: Mr) =>
   mr.error
-    ? "Error"
+    ? "Status unavailable"
     : mr.state === "merged"
       ? "Merged"
       : mr.state === "closed"
@@ -34,7 +34,9 @@ const stateLabel = (mr: Mr) =>
           : "Open";
 
 const stateClass = (mr: Mr) =>
-  mr.error || mr.state === "closed"
+  mr.error
+    ? "text-muted-foreground"
+    : mr.state === "closed"
     ? "text-destructive"
     : mr.state === "merged"
       ? "text-purple-600 dark:text-purple-400"
@@ -121,8 +123,18 @@ function RefreshButton({ loading, onClick }: { loading: boolean; onClick: () => 
         onClick();
       }}
     >
-      <Icon name="RefreshCw" className={cn("size-3.5", loading && "animate-spin")} />
+      <Icon name="RotateCcw" className={cn("size-3.5", loading && "animate-spin")} />
     </button>
+  );
+}
+
+/** `ref` then the title on one line; the host row truncates the whole name. */
+function RefTitle({ mr }: { mr: Mr }) {
+  return (
+    <>
+      <span className="font-medium">{mr.ref}</span>
+      {mr.title ? <span className="text-muted-foreground"> {mr.title}</span> : null}
+    </>
   );
 }
 
@@ -138,8 +150,7 @@ function CardSection({ threadId }: { threadId: string }) {
           icon="GitMerge"
           label={
             <span className="block truncate">
-              <span className="font-medium">{mr.ref}</span>
-              {mr.title ? <span className="text-muted-foreground"> {mr.title}</span> : null}
+              <RefTitle mr={mr} />
             </span>
           }
           title={tooltip(mr)}
@@ -169,8 +180,7 @@ function InfoMrs({ threadId }: { threadId: string }) {
         renderItem={(mr) => (
           <InfoListRow
             leading={<Icon name="GitMerge" className="size-3" />}
-            name={mr.ref}
-            context={mr.title}
+            name={<RefTitle mr={mr} />}
             title={tooltip(mr)}
             trailing={<Chips mr={mr} />}
             onSelect={() => navigate.openUrl(mr.webUrl ?? mr.url)}

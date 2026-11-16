@@ -12,7 +12,7 @@ output) for MR/PR URLs and fetches each one's live status.
 
 | Command | Effect |
 | --- | --- |
-| `bb session-mrs list [--thread <id>] [--refresh] [--json]` | Table of ref, state, pipeline, title, url for the thread. Defaults to the current thread. |
+| `bb session-mrs list [--thread <id>] [--refresh] [--all] [--json]` | Table of ref, state, pipeline, title, url, sorted open, draft, merged, closed. Defaults to the current thread. Links that do not resolve to a real MR/PR (404, no access, unknown host) are hidden; `--all` includes them. |
 | `bb session-mrs status <url> [--json]` | Live status of one GitLab MR or GitHub PR URL. |
 
 Columns: `STATE` is Open, Draft, Merged, Closed, or Error. `CI` is `✓` passed,

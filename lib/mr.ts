@@ -30,6 +30,8 @@ export interface MrStatus extends MrRef {
   webUrl?: string;
   /** Set when the live fetch failed; the row keeps its URL and ref. */
   error?: string;
+  /** `permanent`: the link does not resolve to a real MR/PR (hidden by default). */
+  errorKind?: "transient" | "permanent";
 }
 
 export const MAX_MRS_PER_THREAD = 50;
@@ -164,6 +166,41 @@ export function mapGithubPr(ref: MrRef, pr: any): MrStatus {
     updatedAt: str(pr.updatedAt),
     webUrl: str(pr.url) ?? ref.url,
   };
+}
+
+// Timeouts, network trouble, 5xx, rate limits and a missing CLI say nothing
+// about the link itself; any other failure (404, 401/403, unknown host or
+// project, GraphQL "Could not resolve") means it is not a reachable MR/PR.
+const TRANSIENT_RE =
+  /timed out|timeout|ETIMEDOUT|ECONN|EAI_AGAIN|ENETUNREACH|network is unreachable|connection (reset|refused)|HTTP 5\d\d|\b5\d\d (bad|service|gateway|internal)|bad gateway|service unavailable|rate limit|(glab|gh) not found/i;
+
+export function classifyError(message: string): "transient" | "permanent" {
+  return TRANSIENT_RE.test(message) ? "transient" : "permanent";
+}
+
+const STATE_RANK = { open: 0, merged: 2, closed: 3 } as const;
+
+function rank(mr: MrStatus): number {
+  if (mr.error || !mr.state) return 4;
+  return mr.state === "open" && mr.draft ? 1 : STATE_RANK[mr.state];
+}
+
+/** Open, draft, merged, closed, unavailable; most recently updated first within each. */
+export function sortMrs(rows: MrStatus[]): MrStatus[] {
+  return rows
+    .map((row, i) => ({ row, i }))
+    .sort(
+      (a, b) =>
+        rank(a.row) - rank(b.row) ||
+        (b.row.updatedAt ?? "").localeCompare(a.row.updatedAt ?? "") ||
+        a.i - b.i,
+    )
+    .map(({ row }) => row);
+}
+
+/** Drop links that do not resolve to a real MR/PR. */
+export function visibleMrs(rows: MrStatus[]): MrStatus[] {
+  return rows.filter((r) => r.errorKind !== "permanent");
 }
 
 /** Chip label: draft wins over open. */

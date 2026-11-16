@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  classifyError,
   extractMrRefs,
   formatTable,
   mapGithubPr,
   mapGitlabMr,
   parseMrUrl,
+  sortMrs,
   stateLabel,
   summarizeChecks,
+  visibleMrs,
+  type MrStatus,
 } from "../lib/mr.ts";
 
 const urls = (t: string, max?: number) => extractMrRefs(t, max).map((r) => r.url);
@@ -103,4 +107,40 @@ test("table is bounded and shows errors", () => {
   assert.match(out, /\(gh failed\)/);
   assert.ok(out.split("\n").every((l) => l.length < 220));
   assert.match(formatTable([]), /No merge requests/);
+});
+
+test("error classification: only transient failures are kept", () => {
+  for (const m of [
+    "glab: 404 Project Not Found (HTTP 404)",
+    "glab: 401 Unauthorized (HTTP 401)",
+    "gh: HTTP 403: Forbidden",
+    "Unauthenticated.",
+    "GraphQL: Could not resolve to a Repository with the name 'a/b'.",
+    "dial tcp: lookup nope.invalid: no such host",
+  ]) assert.equal(classifyError(m), "permanent", m);
+  for (const m of ["timed out", "connect ETIMEDOUT 1.2.3.4:443", "ECONNRESET", "glab: 502 Bad Gateway (HTTP 502)", "glab not found", "API rate limit exceeded"]) {
+    assert.equal(classifyError(m), "transient", m);
+  }
+  const ref = extractMrRefs("https://github.com/a/b/pull/1")[0]!;
+  const rows: MrStatus[] = [
+    { ...ref, state: "open" },
+    { ...ref, error: "404", errorKind: "permanent" },
+    { ...ref, error: "timed out", errorKind: "transient" },
+  ];
+  assert.equal(visibleMrs(rows).length, 2);
+});
+
+test("sort: open, draft, merged, closed, unavailable; newest first within a group", () => {
+  const ref = extractMrRefs("https://github.com/a/b/pull/1")[0]!;
+  const mk = (n: number, state: MrStatus["state"], updatedAt?: string, draft = false): MrStatus => ({ ...ref, number: n, state, draft, updatedAt });
+  const rows = [
+    mk(1, "closed", "2026-01-09"),
+    mk(2, "merged", "2026-01-01"),
+    mk(3, "open", "2026-01-02", true),
+    mk(4, "open", "2026-01-01"),
+    mk(5, "merged", "2026-01-05"),
+    mk(6, "open", "2026-01-03"),
+    { ...ref, number: 7, error: "timed out", errorKind: "transient" as const },
+  ];
+  assert.deepEqual(sortMrs(rows).map((r) => r.number), [6, 4, 3, 5, 2, 1, 7]);
 });

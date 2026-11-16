@@ -7,12 +7,15 @@ import { delimiter, join } from "node:path";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
+  classifyError,
   extractMrRefs,
   formatTable,
   mapGithubPr,
   MAX_MRS_PER_THREAD,
   mapGitlabMr,
   parseMrUrl,
+  sortMrs,
+  visibleMrs,
   type MrRef,
   type MrStatus,
 } from "./lib/mr.ts";
@@ -35,6 +38,7 @@ const mrStatusSchema = z.object({
   updatedAt: z.string().optional(),
   webUrl: z.string().optional(),
   error: z.string().optional(),
+  errorKind: z.enum(["transient", "permanent"]).optional(),
 });
 
 export const rpcContract = defineRpcContract({
@@ -117,7 +121,8 @@ async function fetchStatus(ref: MrRef): Promise<MrStatus> {
     ]);
     return mapGithubPr(ref, JSON.parse(out));
   } catch (e) {
-    return { ...ref, error: e instanceof Error ? e.message : String(e) };
+    const error = e instanceof Error ? e.message : String(e);
+    return { ...ref, error, errorKind: classifyError(error) };
   }
 }
 
@@ -191,9 +196,11 @@ export default async function plugin(bb: BbPluginApi) {
     return refs;
   }
 
-  async function listThreadMergeRequests(threadId: string, refresh = false): Promise<MrStatus[]> {
+  /** Sorted rows; links that do not resolve to a real MR/PR only with `all`. */
+  async function listThreadMergeRequests(threadId: string, refresh = false, all = false): Promise<MrStatus[]> {
     const refs = await threadRefs(threadId, refresh);
-    return mapLimit(refs, CONCURRENCY, (ref) => cachedStatus(ref, refresh));
+    const rows = await mapLimit(refs, CONCURRENCY, (ref) => cachedStatus(ref, refresh));
+    return sortMrs(all ? rows : visibleMrs(rows));
   }
 
   bb.rpc.register(rpcContract, {
@@ -207,7 +214,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   const usage = [
     "Usage:",
-    "  bb session-mrs list [--thread <id>] [--refresh] [--json]",
+    "  bb session-mrs list [--thread <id>] [--refresh] [--all] [--json]",
     "  bb session-mrs status <url> [--json]",
   ].join("\n");
 
@@ -217,8 +224,8 @@ export default async function plugin(bb: BbPluginApi) {
     commands: [
       {
         name: "list",
-        summary: "List MRs/PRs linked in a thread (default: the current thread)",
-        usage: "bb session-mrs list [--thread <id>] [--refresh] [--json]",
+        summary: "List MRs/PRs linked in a thread (default: the current thread); --all adds links that do not resolve",
+        usage: "bb session-mrs list [--thread <id>] [--refresh] [--all] [--json]",
       },
       {
         name: "status",
@@ -231,10 +238,12 @@ export default async function plugin(bb: BbPluginApi) {
       const args: string[] = [];
       let thread: string | undefined;
       let refresh = false;
+      let all = false;
       for (let i = 0; i < argv.length; i++) {
         const a = argv[i]!;
         if (a === "--json") continue;
         if (a === "--refresh") refresh = true;
+        else if (a === "--all") all = true;
         else if (a === "--thread") thread = argv[++i];
         else if (a.startsWith("--thread=")) thread = a.slice("--thread=".length);
         else args.push(a);
@@ -252,7 +261,7 @@ export default async function plugin(bb: BbPluginApi) {
             if (!threadId || rest.length > 0 || !/^[A-Za-z0-9_-]{1,100}$/.test(threadId)) {
               return { exitCode: 1, stderr: `${usage}\n(pass --thread <id>)` };
             }
-            const rows = await listThreadMergeRequests(threadId, refresh);
+            const rows = await listThreadMergeRequests(threadId, refresh, all);
             return out(rows, formatTable(rows));
           }
           case "status": {
