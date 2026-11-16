@@ -7,10 +7,10 @@
     "bbPluginSdk": ">=0.6.132"
   },
   "bb": {
-    "name": "Session Mrs",
-    "description": "A BB plugin with an example todo list.",
+    "name": "Session MRs",
+    "description": "Shows the merge/pull requests linked in the current thread, with live status and clickable links.",
     "branding": {
-      "icon": "ListTodo"
+      "icon": "GitMerge"
     },
     "server": "./server.ts",
     "app": "./app.tsx"
