@@ -123,7 +123,7 @@ function RefreshButton({ loading, onClick }: { loading: boolean; onClick: () => 
         onClick();
       }}
     >
-      <Icon name="RotateCcw" className={cn("size-3.5", loading && "animate-spin")} />
+      <Icon name="ArrowReloadHorizontal" className={cn("size-3.5", loading && "animate-spin")} />
     </button>
   );
 }
