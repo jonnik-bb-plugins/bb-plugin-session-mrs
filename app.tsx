@@ -1,198 +1,198 @@
-// bb-plugin-session-mrs — a BB plugin frontend entry.
-//
-// Compiled by `bb plugin build` into dist/app.js + dist/app.css. React and
-// @get-bb/plugin-sdk/app are provided by the BB app at load time (never bundled),
-// so this file must be loaded by BB, not imported directly.
-//
-// The components under components/ui/ are YOURS: vendored source (shadcn
-// model), edit freely. Add more from the BB registry with
-// `npx shadcn add @bb/<name>` (see components.json) — dropdowns, tables,
-// the full shadcn set, version-matched to this BB install. Run
-// `npm install` once before `bb plugin build`.
+// bb-plugin-session-mrs — frontend: the "Merge requests" section of the thread
+// context card and of the Info tab. Both render the same RPC-backed list.
 import { useCallback, useEffect, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
-import { definePluginApp, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
-import type { rpcContract, Todo } from "./server";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import type { MouseEvent } from "react";
+import {
+  definePluginApp,
+  experimental_InfoList as InfoList,
+  experimental_InfoListRow as InfoListRow,
+  experimental_InfoSection as InfoSection,
+  experimental_THREAD_INFO_SECTION_GROUPS as SECTION_GROUPS,
+  experimental_ThreadContextCardRow as ThreadContextCardRow,
+  useBbNavigate,
+  useRpc,
+} from "@get-bb/plugin-sdk/app";
+import type { rpcContract } from "./server";
 import { Icon } from "@/components/ui/icon";
-import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
-/** The todo list, kept current by the server's "todos-changed" signal. */
-function useTodos() {
+type Mr = Awaited<
+  ReturnType<ReturnType<typeof useRpc<typeof rpcContract>>["call"]>
+>[number];
+
+const POLL_MS = 60_000;
+
+const stateLabel = (mr: Mr) =>
+  mr.error
+    ? "Error"
+    : mr.state === "merged"
+      ? "Merged"
+      : mr.state === "closed"
+        ? "Closed"
+        : mr.draft
+          ? "Draft"
+          : "Open";
+
+const stateClass = (mr: Mr) =>
+  mr.error || mr.state === "closed"
+    ? "text-destructive"
+    : mr.state === "merged"
+      ? "text-purple-600 dark:text-purple-400"
+      : mr.draft
+        ? "text-muted-foreground"
+        : "text-emerald-600 dark:text-emerald-400";
+
+const PIPELINE = {
+  success: { symbol: "✓", label: "Pipeline passed", cls: "text-emerald-600 dark:text-emerald-400" },
+  failure: { symbol: "✗", label: "Pipeline failed", cls: "text-destructive" },
+  pending: { symbol: "…", label: "Pipeline running", cls: "text-muted-foreground" },
+} as const;
+
+/** Fetches on mount, on threadId change, and every minute while mounted. */
+function useThreadMrs(threadId: string) {
   const rpc = useRpc<typeof rpcContract>();
-  const [todos, setTodos] = useState<Todo[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const report = useCallback((cause: unknown) => {
-    setError(cause instanceof Error ? cause.message : String(cause));
-  }, []);
-  const refetch = useCallback(() => {
-    rpc.call("todos_list").then((result) => {
-      setTodos(result.todos);
-      setError(null);
-    }, report);
-  }, [rpc, report]);
+  const [mrs, setMrs] = useState<Mr[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(
+    async (refresh: boolean, isCurrent: () => boolean = () => true) => {
+      setLoading(true);
+      try {
+        const rows = await rpc.call("listThreadMergeRequests", { threadId, refresh });
+        if (isCurrent()) setMrs(rows);
+      } catch (cause) {
+        console.warn("session-mrs: failed to load merge requests", cause);
+      } finally {
+        if (isCurrent()) setLoading(false);
+      }
+    },
+    [rpc, threadId],
+  );
+
   useEffect(() => {
-    refetch();
-  }, [refetch]);
-  // server.ts publishes after every write — from this page, another window,
-  // or `bb session-mrs add` run by an agent — so the list never goes stale.
-  useRealtime("todos-changed", refetch);
-  return { rpc, todos, error, report, refetch };
+    let current = true;
+    setMrs([]);
+    void load(false, () => current);
+    const timer = setInterval(() => void load(false, () => current), POLL_MS);
+    return () => {
+      current = false;
+      clearInterval(timer);
+    };
+  }, [load]);
+
+  return { mrs, loading, refresh: () => void load(true) };
 }
 
-function TodoRow({
-  todo,
-  onToggle,
-  onRemove,
-}: {
-  todo: Todo;
-  onToggle: (done: boolean) => void;
-  onRemove: () => void;
-}) {
+function Chips({ mr }: { mr: Mr }) {
+  const p = mr.error ? undefined : mr.pipeline && mr.pipeline !== "none" ? PIPELINE[mr.pipeline] : undefined;
   return (
-    <li className="flex items-center gap-3 py-2.5 text-sm">
-      <Checkbox
-        checked={todo.done}
-        onCheckedChange={(checked) => onToggle(checked === true)}
-        aria-label={`Mark "${todo.title}" ${todo.done ? "not done" : "done"}`}
-      />
-      <span
-        className={cn(
-          "min-w-0 flex-1 truncate",
-          todo.done && "text-muted-foreground line-through",
-        )}
-      >
-        {todo.title}
-      </span>
-      <span className="hidden font-mono text-xs text-muted-foreground sm:inline">
-        {todo.id}
-      </span>
-      <Button
-        variant="ghost"
-        size="icon"
-        className="size-7 text-muted-foreground hover:text-foreground"
-        aria-label={`Remove "${todo.title}"`}
-        onClick={onRemove}
-      >
-        <Icon name="Trash2" className="size-4" />
-      </Button>
-    </li>
+    <span className="flex shrink-0 items-center gap-1.5 text-xs">
+      <span className={cn("font-medium", stateClass(mr))}>{stateLabel(mr)}</span>
+      {p ? (
+        <span className={p.cls} title={p.label} aria-label={p.label}>
+          {p.symbol}
+        </span>
+      ) : null}
+    </span>
   );
 }
 
-/** The dashed box BB's own list pages use for loading and empty states. */
-function EmptyState({ children }: { children: ReactNode }) {
+const tooltip = (mr: Mr) =>
+  [
+    mr.title,
+    mr.error ? `Failed to load status: ${mr.error}` : null,
+    mr.sourceBranch && mr.targetBranch ? `${mr.sourceBranch} → ${mr.targetBranch}` : null,
+    mr.author ? `by ${mr.author}` : null,
+    mr.mergeStatus ? `merge status: ${mr.mergeStatus}` : null,
+  ]
+    .filter(Boolean)
+    .join("\n") || mr.url;
+
+function RefreshButton({ loading, onClick }: { loading: boolean; onClick: () => void }) {
   return (
-    <div
-      role="status"
-      className="rounded-lg border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground"
+    <button
+      type="button"
+      title="Refresh merge requests"
+      aria-label="Refresh merge requests"
+      disabled={loading}
+      className="inline-flex size-5 cursor-pointer items-center justify-center rounded text-muted-foreground hover:text-foreground disabled:opacity-50"
+      onClick={(event: MouseEvent) => {
+        event.stopPropagation();
+        onClick();
+      }}
     >
-      {children}
-    </div>
+      <Icon name="RefreshCw" className={cn("size-3.5", loading && "animate-spin")} />
+    </button>
   );
 }
 
-// Tailwind classes compile against the host theme's live CSS variables —
-// derive colors from the theme tokens, never hardcoded grays. The frame
-// (scrolling page, centered column) matches BB's own nav-panel pages.
-function TodosPage() {
-  const { rpc, todos, error, report, refetch } = useTodos();
-  const [title, setTitle] = useState("");
-  const [pending, setPending] = useState(false);
-  const add = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const next = title.trim();
-    if (next === "" || pending) return;
-    setPending(true);
-    try {
-      await rpc.call("todos_add", { title: next });
-      setTitle("");
-      refetch();
-    } catch (cause) {
-      report(cause);
-    } finally {
-      setPending(false);
-    }
-  };
-  const doneCount = todos?.filter((todo) => todo.done).length ?? 0;
+function CardSection({ threadId }: { threadId: string }) {
+  const { mrs, loading, refresh } = useThreadMrs(threadId);
+  const navigate = useBbNavigate();
+  if (mrs.length === 0) return null;
   return (
-    <div className="h-full min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto box-border w-full max-w-3xl px-4 pb-4 pt-3 md:px-5 md:pt-4">
-        <p className="text-sm text-muted-foreground">
-          Agents keep this list with <code>bb session-mrs</code>; the skill in{" "}
-          <code>skills/example-todos</code> tells them how.
-        </p>
-        <form onSubmit={add} className="mt-4 flex items-center gap-2">
-          <Input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            placeholder="What needs doing?"
-            aria-label="New todo"
-          />
-          <Button type="submit" disabled={pending || title.trim() === ""}>
-            <Icon name="Plus" className="size-4" />
-            Add
-          </Button>
-        </form>
-        {error === null ? null : (
-          <p role="alert" className="mt-3 text-sm text-destructive">
-            {error}
-          </p>
-        )}
-        <div className="mt-4">
-          {todos === null ? (
-            <EmptyState>Loading todos…</EmptyState>
-          ) : todos.length === 0 ? (
-            <EmptyState>
-              Nothing to do. Add one above, or run{" "}
-              <code>bb session-mrs add "Ship it"</code>.
-            </EmptyState>
-          ) : (
-            <ul className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card px-4">
-              {todos.map((todo) => (
-                <TodoRow
-                  key={todo.id}
-                  todo={todo}
-                  onToggle={(done) => {
-                    rpc
-                      .call("todos_set_done", { id: todo.id, done })
-                      .then(refetch, report);
-                  }}
-                  onRemove={() => {
-                    rpc
-                      .call("todos_remove", { id: todo.id })
-                      .then(refetch, report);
-                  }}
-                />
-              ))}
-            </ul>
-          )}
-        </div>
-        {todos !== null && todos.length > 0 ? (
-          <p className="mt-2 text-xs text-muted-foreground">
-            {doneCount} of {todos.length} done
-          </p>
-        ) : null}
-      </div>
-    </div>
+    <>
+      {mrs.map((mr) => (
+        <ThreadContextCardRow
+          key={mr.url}
+          icon="GitMerge"
+          label={
+            <span className="block truncate">
+              <span className="font-medium">{mr.ref}</span>
+              {mr.title ? <span className="text-muted-foreground"> {mr.title}</span> : null}
+            </span>
+          }
+          title={tooltip(mr)}
+          trailing={<Chips mr={mr} />}
+          action={<RefreshButton loading={loading} onClick={refresh} />}
+          onClick={() => navigate.openUrl(mr.webUrl ?? mr.url)}
+        />
+      ))}
+    </>
   );
 }
 
-// The default export must be definePluginApp(...); BB interprets it after
-// loading the bundle. navPanel adds a page to the left sidebar; register
-// other UI under app.slots and composer actions, plus-menu rows, banners, or
-// rich-text rules with app.composer.customize(...) (see the bb guide's
-// plugins chapter).
+function InfoMrs({ threadId }: { threadId: string }) {
+  const { mrs, loading, refresh } = useThreadMrs(threadId);
+  const navigate = useBbNavigate();
+  if (mrs.length === 0) return null;
+  return (
+    <InfoSection
+      label="Merge requests"
+      count={mrs.length}
+      accessory={<RefreshButton loading={loading} onClick={refresh} />}
+    >
+      <InfoList
+        items={mrs}
+        getKey={(mr) => mr.url}
+        limit={5}
+        renderItem={(mr) => (
+          <InfoListRow
+            leading={<Icon name="GitMerge" className="size-3" />}
+            name={mr.ref}
+            context={mr.title}
+            title={tooltip(mr)}
+            trailing={<Chips mr={mr} />}
+            onSelect={() => navigate.openUrl(mr.webUrl ?? mr.url)}
+          />
+        )}
+      />
+    </InfoSection>
+  );
+}
+
 export default definePluginApp((app) => {
-  app.slots.navPanel({
-    id: "example-todos",
-    title: "Example todos",
-    icon: "ListTodo",
-    // Routed at /plugins/session-mrs/example-todos; the component receives the
-    // remainder as `subPath` for deep links within the page.
-    path: "example-todos",
-    component: TodosPage,
+  app.slots.experimental_threadContextCardSection({
+    id: "merge-requests",
+    title: "Merge requests",
+    group: SECTION_GROUPS.related,
+    order: 10,
+    component: CardSection,
+  });
+  app.slots.experimental_threadInfoSection({
+    id: "merge-requests",
+    group: SECTION_GROUPS.related,
+    order: 10,
+    component: InfoMrs,
   });
 });
