@@ -1,142 +1,48 @@
-# bb-plugin-session-mrs
+# Session MRs
 
-A BB plugin that keeps a todo list. It shows every surface a plugin can own:
+A BB plugin that shows every GitLab merge request and GitHub pull request linked
+in the current thread, with live state, pipeline/checks status and a clickable
+link.
 
-- `server.ts` — the backend: a todo store in `bb.storage.kv`, RPC methods
-  for the page, a `bb session-mrs` CLI command, a setting, and a realtime signal
-  that keeps every open page current.
-- `app.tsx` — the frontend: an **Example todos** page in the left sidebar
-  (`app.slots.navPanel`) built from the vendored components.
-- `skills/example-todos/SKILL.md` — a skill that tells agents how to keep the list
-  with `bb session-mrs`. BB imports it into agent threads automatically.
-- `PLUGIN_OVERVIEW.md` — the store listing text: a longer version of
-  `bb.description` that the plugin detail page shows under it. See
-  [Store listing](#store-listing).
+## What you get
 
-Try it: install the plugin, open **Example todos** in the sidebar, then run
-`bb session-mrs add "Ship it"` in a terminal. The page updates at once.
+- A **Merge requests** section in the thread context card and in the thread Info
+  tab. One row per MR: `repo !123` (GitLab) or `owner/repo #45` (GitHub), the
+  title, a state chip (Draft / Open / Merged / Closed) and the pipeline or checks
+  result (`✓` / `✗` / `…`). Clicking a row opens the MR in the browser. The
+  section is hidden when the thread links no MR. It refetches on mount, when the
+  thread changes, and every 60 seconds; the refresh icon forces a fresh read.
+- `bb session-mrs list [--thread <id>] [--refresh] [--json]` and
+  `bb session-mrs status <url> [--json]` for agents and shells. See
+  `skills/session-mrs/SKILL.md`.
 
-## UI components
+## How it works
 
-`components/ui/` is vendored source you own (the shadcn model): edit the
-files freely — they never update out from under you. Add more from the BB
-component registry (the full shadcn set, version-matched to your BB install
-via the pinned ref in `components.json`):
+- `lib/mr.ts` extracts and canonicalizes URLs (GitLab `https://<host>/<group
+  path>/-/merge_requests/<iid>`, GitHub `https://github.com/<owner>/<repo>/pull/<n>`)
+  and maps API payloads to one status shape.
+- `server.ts` reads the thread's raw events page by page (user input and
+  completed items, which include command output; the timeline view collapses
+  tool output), keeps at most 50 links, and fetches status with `glab api` /
+  `gh pr view` through `execFile` (15 s timeout, 4 at a time, binaries resolved
+  against PATH plus `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`). A failed
+  lookup keeps its row with an error marker.
+- Caches (memory only): per-URL status for 60 s; per-thread link list until the
+  thread's next `thread.idle`. RPC: `listThreadMergeRequests({ threadId,
+  refresh? })`.
 
-```
-npx shadcn add @bb/select @bb/table
-```
+## Requirements
 
-Run `npm install` once before `bb plugin build` — the vendored components'
-npm deps bundle into your dist. React, and BB-shimmed packages like the
-radix portal primitives and `sonner` (`import { toast } from "sonner"`
-reaches BB's own toaster), are provided by the BB app at runtime and never
-bundled. Every shimmed package is declared in `devDependencies` at the
-host's version so those imports typecheck; keep them there (never in
-`dependencies`, which would bundle a second copy), and `bb plugin types`
-repins declared packages alongside the SDK; unused packages may be removed. Ship `dist/` (npm tarball or committed for
-git installs) so people installing your plugin never need npm.
+`glab` (authenticated for each GitLab host) and/or `gh` (authenticated for
+github.com) on the machine that runs the BB server. The plugin never stores or
+prints credentials.
 
-## Manifest
-
-`package.json` is the plugin manifest. Notable fields:
-
-- `bb.server` — backend entry (required).
-- `bb.app` — frontend entry. Delete it, `app.tsx`, `components/`,
-  `hooks/`, and `lib/` for a headless plugin.
-- `bb.skills` — skill roots; omitted here, so BB reads `skills/`. Each
-  directory with a `SKILL.md` is one skill, named after the directory.
-- `bb.name` and `bb.description` — required human-facing identity.
-- `bb.branding` — required; declare `icon` as a BB icon name or a
-  plugin-relative compact SVG, or declare `logo.light` (with optional
-  `logo.dark`). Logo assets must be relative `.svg`, `.png`, or
-  `.webp` files.
-- `engines.bb` — supported bb app version range.
-- `engines.bbPluginSdk` — the lowest plugin SDK you need (scaffold:
-  `>=0.6.132`). BB reads this as a floor, not a ceiling: a later
-  SDK in the same major still loads your plugin.
-- `dependencies` — every package your source imports that BB does not provide.
-  `bb plugin build` inlines them into `dist/`, and git installs resolve this
-  list alone, so a build-required package here rather than in
-  `devDependencies` is what keeps your plugin installable. `devDependencies`
-  is for types and tooling only (BB shims React, the portal primitives, and
-  `@get-bb/plugin-sdk` at runtime — never bundle them).
-
-Run `bb plugin build` before publishing git/npm installs. It writes
-`dist/server.js` + `server.meta.json` and `app.js` / `app.css` /
-`app.meta.json`. Each `*.meta.json` stamps SDK major/version,
-`artifactFormatVersion`, `pluginId`, `pluginVersion`, and
-`builtWith` so managed installs can verify the artifacts. `app.meta.json`
-also lists `runtimeSlots`, the shimmed host modules the bundle imports.
-
-## Store listing
-
-Two texts describe the plugin in the store. `bb.description` in package.json
-is the one-sentence hook on every browse card and the lead paragraph on the
-detail page; keep it under about 140 characters. `PLUGIN_OVERVIEW.md` is the
-same claim at length, shown in an Overview section under that paragraph.
-Rewrite the scaffold's copy for your plugin, and update it whenever
-`bb.description` changes, so the two never disagree.
-
-The submission to the public BB Community marketplace requires the file. Keep
-it under 4000 characters (aim for 700 to 1800) and use headings, paragraphs,
-emphasis, code, blockquotes, lists, thematic breaks, and absolute https links
-only — raw HTML, images, tables, footnotes, and task lists are rejected. Do
-not open with a `#` title or repeat `bb.description` verbatim; the page
-shows both directly above.
-
-## Install
-
-From this directory (`bb plugin new` already ran the install; a fresh clone
-needs it):
+## Development
 
 ```
 npm install
+npm test            # node --test: URL extraction and status mapping
+npm run typecheck
+bb plugin build
 bb plugin install .
 ```
-
-After editing sources, reload:
-
-```
-bb plugin reload session-mrs
-```
-
-Or let `bb plugin dev` rebuild and reload on every save.
-
-## Configure
-
-```
-bb plugin config session-mrs
-bb plugin config session-mrs set showDone false
-bb plugin reload session-mrs
-```
-
-## Types & API reference
-
-The plugin API ships as the npm package `@get-bb/plugin-sdk`, pinned to an
-exact version in `devDependencies` (`0.6.132` — the SDK of the BB
-that scaffolded this plugin). After `npm install`, the full surface is on disk
-at:
-
-```
-node_modules/@get-bb/plugin-sdk/bundled-types/bb-plugin-sdk.d.ts      # backend
-node_modules/@get-bb/plugin-sdk/bundled-types/bb-plugin-sdk-app.d.ts  # frontend
-```
-
-Your editor and `tsc` resolve `@get-bb/plugin-sdk` there through ordinary node
-resolution — no path mapping. These are readable declarations: open them for an
-exact signature.
-
-The SDK surface grows with every BB release, so the pin has to track the BB you
-actually run:
-
-```
-bb plugin types          # sync this plugin's SDK surface to the running BB
-bb plugin types --check  # CI: fail when it does not match
-```
-
-Ask BB to write plugins for you: the `bb-plugin-authoring` skill documents
-the whole surface with examples.
-
-Confused by the API, or need something the types don't explain? Clone the BB
-repo and read the source: <https://github.com/get-bb/bb>.

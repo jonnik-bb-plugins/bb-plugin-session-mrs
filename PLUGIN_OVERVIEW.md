@@ -1,21 +1,14 @@
-Keep a todo list beside the work it belongs to, in the sidebar and in
-your agent threads.
+See every merge or pull request linked in the current thread, with live state,
+pipeline status and a clickable link, in the thread context card and the Info
+tab, and from the `bb session-mrs` command.
 
 ## What you get
 
-- An **Example todos** page in the left sidebar that adds, completes, and
-  removes todos.
-- A `bb session-mrs` command that does the same from a terminal.
-- Live updates, so a change made in one place reaches every open page at once.
+- A **Merge requests** section listing each GitLab MR or GitHub PR the thread
+  mentions, with a Draft / Open / Merged / Closed chip and a pipeline result.
+- `bb session-mrs list` and `bb session-mrs status <url>` for agents.
 
 ## How it works
 
-The todos live in this plugin's own storage on the BB server, one list per
-installation. Nothing leaves the machine, and the plugin needs no account, API
-key, or external service.
-
-## For agents
-
-The bundled skill tells an agent to read the list with `bb session-mrs list`, add
-one todo at a time with `bb session-mrs add`, and close finished work with
-`bb session-mrs done`.
+Status comes from the `glab` and `gh` logins already on the machine that runs
+the BB server. The plugin is read-only and stores nothing.
