@@ -47,6 +47,10 @@ belongs to. Mentioned-only links are hidden; `--mentioned` shows them with an
 github.com) on the machine that runs the BB server. The plugin never stores or
 prints credentials.
 
+A link on a host where the CLI is not logged in, or that the account cannot
+open, does not resolve to an MR/PR and is hidden. Run `glab auth login` or
+`gh auth login` for that host, then use the refresh icon.
+
 ## Development
 
 ```
